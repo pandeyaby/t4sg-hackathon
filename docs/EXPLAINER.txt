@@ -1,0 +1,5 @@
+Non-technical explanation
+This app helps field workers quickly check farmer documents. They take a photo, the system reads key details, and it compares them with known farmer records. If it matches, it says the document is valid; if not, it asks for review. This reduces mistakes and saves time.
+
+Technical explanation
+The frontend uploads a document image to the API. The backend runs quality checks, OCR (currently via tesseract CLI), and then validates extracted fields against the farmers database. Validation returns a match score, issues, and recommended next steps. Data can be stored in SQLite for fast local queries and offline-friendly access.

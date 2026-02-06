@@ -43,7 +43,7 @@ export default function RootLayout({
           {/* Footer */}
           <footer className="bg-forest-800 text-forest-200 py-6 mt-auto">
             <div className="max-w-7xl mx-auto px-4 text-center text-sm">
-              <p>Built for Cisco Tech for Social Good Hackathon 2026</p>
+              <p>Built by Cisco for 'Tech for Social Good Hackathon 2026'</p>
               <p className="mt-1 text-forest-400">Empowering rural farmers through AI-driven verification</p>
             </div>
           </footer>

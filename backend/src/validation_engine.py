@@ -4,12 +4,26 @@ Validates extracted data against farmer database using fuzzy matching.
 """
 
 import json
+import os
 import re
+import difflib
+from db import list_farmers
 from dataclasses import dataclass
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Union
 from pathlib import Path
 
-from rapidfuzz import fuzz, process
+def _ratio(a: str, b: str) -> int:
+    if not a or not b:
+        return 0
+    return int(difflib.SequenceMatcher(None, a, b).ratio() * 100)
+
+
+def _token_sort_ratio(a: str, b: str) -> int:
+    if not a or not b:
+        return 0
+    a_tokens = " ".join(sorted(a.split()))
+    b_tokens = " ".join(sorted(b.split()))
+    return _ratio(a_tokens, b_tokens)
 
 
 @dataclass
@@ -28,7 +42,7 @@ class ValidationEngine:
     Uses fuzzy matching for names and exact matching for IDs.
     """
     
-    def __init__(self, farmer_database: str | list):
+    def __init__(self, farmer_database: Union[str, list]):
         """
         Initialize with farmer database.
         
@@ -36,10 +50,21 @@ class ValidationEngine:
             farmer_database: Path to JSON file or list of farmer records
         """
         if isinstance(farmer_database, str):
-            with open(farmer_database, 'r', encoding='utf-8') as f:
-                self.farmers = json.load(f)
+            if farmer_database.endswith(".db"):
+                self.farmers = list_farmers()
+            else:
+                with open(farmer_database, 'r', encoding='utf-8') as f:
+                    self.farmers = json.load(f)
         else:
             self.farmers = farmer_database
+
+        self._use_rapidfuzz = os.getenv("USE_RAPIDFUZZ", "true").lower() == "true"
+        self._fuzz = None
+        self._process = None
+        if self._use_rapidfuzz:
+            from rapidfuzz import fuzz, process
+            self._fuzz = fuzz
+            self._process = process
         
         # Build lookup indices for faster matching
         self._build_indices()
@@ -140,13 +165,13 @@ class ValidationEngine:
         # Name matching (highest weight)
         if extracted.get('name') and farmer.get('name'):
             # Try both original and English name
-            name_score = fuzz.token_sort_ratio(
+            name_score = self._token_sort_ratio(
                 extracted['name'].lower(),
                 farmer['name'].lower()
             )
             
             if farmer.get('name_en'):
-                name_score_en = fuzz.token_sort_ratio(
+                name_score_en = self._token_sort_ratio(
                     extracted['name'].lower(),
                     farmer['name_en'].lower()
                 )
@@ -161,7 +186,7 @@ class ValidationEngine:
                 scores.append(100)
             else:
                 # Allow for minor typos
-                acc_score = fuzz.ratio(
+                acc_score = self._ratio(
                     extracted['account_number'],
                     farmer['account_number']
                 )
@@ -170,7 +195,7 @@ class ValidationEngine:
         
         # Survey number
         if extracted.get('survey_number') and farmer.get('survey_number'):
-            survey_score = fuzz.ratio(
+            survey_score = self._ratio(
                 str(extracted['survey_number']),
                 str(farmer['survey_number'])
             )
@@ -182,7 +207,7 @@ class ValidationEngine:
             if extracted['phone'] == farmer['phone']:
                 scores.append(100)
             else:
-                scores.append(fuzz.ratio(extracted['phone'], farmer['phone']))
+                scores.append(self._ratio(extracted['phone'], farmer['phone']))
             weights.append(1.0)
         
         if not scores:
@@ -244,7 +269,7 @@ class ValidationEngine:
         # Check account number mismatch
         if extracted.get('account_number') and farmer.get('account_number'):
             if extracted['account_number'] != farmer['account_number']:
-                similarity = fuzz.ratio(
+                similarity = self._ratio(
                     extracted['account_number'],
                     farmer['account_number']
                 )
@@ -260,7 +285,7 @@ class ValidationEngine:
         
         # Check name similarity
         if extracted.get('name') and farmer.get('name'):
-            name_sim = fuzz.token_sort_ratio(extracted['name'], farmer['name'])
+            name_sim = self._token_sort_ratio(extracted['name'], farmer['name'])
             if name_sim < 70:
                 warnings.append(
                     f"Name partially matches: '{extracted['name']}' vs '{farmer['name']}'"
@@ -294,6 +319,16 @@ class ValidationEngine:
             return False
         phone_clean = phone.replace(' ', '').replace('-', '')
         return bool(re.match(r'^[6-9]\d{9}$', phone_clean))
+
+    def _ratio(self, a: str, b: str) -> int:
+        if self._fuzz:
+            return self._fuzz.ratio(a, b)
+        return _ratio(a, b)
+
+    def _token_sort_ratio(self, a: str, b: str) -> int:
+        if self._fuzz:
+            return self._fuzz.token_sort_ratio(a, b)
+        return _token_sort_ratio(a, b)
     
     def find_similar_farmers(self, name: str, limit: int = 5) -> List[Dict]:
         """Find farmers with similar names (for suggestions)."""
@@ -304,24 +339,40 @@ class ValidationEngine:
             if farmer.get('name_en'):
                 all_names.append((farmer['name_en'], farmer))
         
-        matches = process.extract(
-            name,
-            [n[0] for n in all_names],
-            scorer=fuzz.token_sort_ratio,
-            limit=limit
-        )
-        
+        if self._process and self._fuzz:
+            matches = self._process.extract(
+                name,
+                [n[0] for n in all_names],
+                scorer=self._fuzz.token_sort_ratio,
+                limit=limit
+            )
+            
+            results = []
+            seen_ids = set()
+            for match_name, score, idx in matches:
+                farmer = all_names[idx][1]
+                if farmer.get('id') not in seen_ids:
+                    results.append({
+                        'farmer': farmer,
+                        'similarity': score
+                    })
+                    seen_ids.add(farmer.get('id'))
+            
+            return results
+
+        scored = []
+        for name_value, farmer in all_names:
+            score = self._token_sort_ratio(name, name_value)
+            scored.append((score, farmer))
+        scored.sort(key=lambda x: x[0], reverse=True)
+
         results = []
         seen_ids = set()
-        for match_name, score, idx in matches:
-            farmer = all_names[idx][1]
+        for score, farmer in scored[:limit]:
             if farmer.get('id') not in seen_ids:
-                results.append({
-                    'farmer': farmer,
-                    'similarity': score
-                })
+                results.append({'farmer': farmer, 'similarity': score})
                 seen_ids.add(farmer.get('id'))
-        
+
         return results
 
 

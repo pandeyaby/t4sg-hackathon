@@ -4,23 +4,10 @@ Extracts text from documents in Hindi, Marathi, and English.
 """
 
 import re
+import subprocess
 from dataclasses import dataclass
 from typing import Optional, Dict
 from pathlib import Path
-
-# Conditional imports for flexibility
-try:
-    from google.cloud import vision
-    GOOGLE_VISION_AVAILABLE = True
-except ImportError:
-    GOOGLE_VISION_AVAILABLE = False
-
-try:
-    import pytesseract
-    from PIL import Image
-    TESSERACT_AVAILABLE = True
-except ImportError:
-    TESSERACT_AVAILABLE = False
 
 
 @dataclass
@@ -38,13 +25,29 @@ class OCRPipeline:
     Uses Google Vision API as primary, Tesseract as fallback.
     """
     
-    def __init__(self, use_google_vision: bool = True):
-        self.use_google_vision = use_google_vision and GOOGLE_VISION_AVAILABLE
-        
+    def __init__(
+        self,
+        use_google_vision: bool = True,
+        allow_tesseract: bool = False,
+        allow_tesseract_cli: bool = False,
+    ):
+        self.use_google_vision = use_google_vision
+        self.allow_tesseract = allow_tesseract
+        self.allow_tesseract_cli = allow_tesseract_cli
+        self.client = None
+        self._vision = None
+
         if self.use_google_vision:
+            try:
+                from google.cloud import vision
+            except Exception as exc:
+                raise RuntimeError("Google Vision is not available.") from exc
+            self._vision = vision
             self.client = vision.ImageAnnotatorClient()
-        elif not TESSERACT_AVAILABLE:
-            raise RuntimeError("No OCR engine available. Install google-cloud-vision or pytesseract.")
+        elif not self.allow_tesseract and not self.allow_tesseract_cli:
+            raise RuntimeError(
+                "OCR is disabled. Set USE_TESSERACT_CLI=true or USE_TESSERACT=true."
+            )
     
     def extract_text(self, image_path: str) -> OCRResult:
         """
@@ -58,15 +61,18 @@ class OCRPipeline:
         """
         if self.use_google_vision:
             return self._google_vision_ocr(image_path)
-        else:
+        if self.allow_tesseract_cli:
+            return self._tesseract_cli_ocr(image_path)
+        if self.allow_tesseract:
             return self._tesseract_ocr(image_path)
+        raise RuntimeError("No OCR engine enabled.")
     
     def _google_vision_ocr(self, image_path: str) -> OCRResult:
         """Use Google Cloud Vision API for OCR."""
         with open(image_path, 'rb') as f:
             content = f.read()
         
-        image = vision.Image(content=content)
+        image = self._vision.Image(content=content)
         
         # Use document_text_detection for better structured output
         response = self.client.document_text_detection(
@@ -102,6 +108,12 @@ class OCRPipeline:
     
     def _tesseract_ocr(self, image_path: str) -> OCRResult:
         """Use Tesseract for OCR (offline fallback)."""
+        try:
+            import pytesseract
+            from PIL import Image
+        except Exception as exc:
+            raise RuntimeError("Tesseract OCR is not available.") from exc
+
         img = Image.open(image_path)
         
         # Try with Hindi + English
@@ -116,7 +128,10 @@ class OCRPipeline:
         
         # Get confidence from Tesseract data
         try:
-            data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+            data = pytesseract.image_to_data(
+                img,
+                output_type=pytesseract.Output.DICT
+            )
             confidences = [int(c) for c in data['conf'] if int(c) > 0]
             confidence = sum(confidences) / len(confidences) / 100 if confidences else 0.5
         except:
@@ -128,6 +143,46 @@ class OCRPipeline:
             confidence=confidence,
             extracted_fields=fields,
             ocr_engine="tesseract"
+        )
+
+    def _tesseract_cli_ocr(self, image_path: str) -> OCRResult:
+        """Use tesseract CLI for OCR (avoids pytesseract imports)."""
+        cmd = [
+            "tesseract",
+            image_path,
+            "stdout",
+            "-l",
+            "eng",
+            "--psm",
+            "6",
+        ]
+        try:
+            result = subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError("tesseract CLI not found. Install tesseract.") from exc
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"tesseract CLI failed: {exc.stderr.strip()}") from exc
+
+        text = result.stdout
+        lang = self._detect_language(text)
+        fields = self._extract_fields(text, lang)
+        field_count = sum(1 for value in fields.values() if value)
+        confidence = min(0.9, 0.4 + (field_count * 0.1))
+        if len(text.strip()) > 80:
+            confidence = min(0.95, confidence + 0.05)
+
+        return OCRResult(
+            raw_text=text,
+            detected_language=lang,
+            confidence=confidence,
+            extracted_fields=fields,
+            ocr_engine="tesseract_cli"
         )
     
     def _detect_language(self, text: str) -> str:

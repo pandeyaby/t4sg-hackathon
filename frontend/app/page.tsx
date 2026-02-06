@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useDropzone } from 'react-dropzone'
 import { Upload, FileCheck, AlertCircle, CheckCircle, Loader2, Camera, RefreshCw } from 'lucide-react'
 
@@ -47,6 +47,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<VerificationResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [validSamples, setValidSamples] = useState<string[]>([])
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const file = acceptedFiles[0]
@@ -56,6 +57,20 @@ export default function Home() {
       setResult(null)
       setError(null)
     }
+  }, [])
+
+  useEffect(() => {
+    const loadSamples = async () => {
+      try {
+        const response = await fetch('/api/samples')
+        if (!response.ok) return
+        const data = await response.json()
+        setValidSamples(data.validSamples || [])
+      } catch {
+        setValidSamples([])
+      }
+    }
+    loadSamples()
   }, [])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -98,6 +113,27 @@ export default function Home() {
     setPreview(null)
     setResult(null)
     setError(null)
+  }
+
+  const loadSample = async (name: string) => {
+    setLoading(true)
+    setError(null)
+    try {
+      const response = await fetch(`/api/sample?name=${encodeURIComponent(name)}`)
+      if (!response.ok) {
+        throw new Error('Failed to load sample')
+      }
+      const blob = await response.blob()
+      const sampleFile = new File([blob], name, { type: blob.type || 'image/png' })
+      setFile(sampleFile)
+      setPreview(URL.createObjectURL(sampleFile))
+      setResult(null)
+    } catch (err) {
+      setError('Could not load sample document. Please try again.')
+      console.error(err)
+    } finally {
+      setLoading(false)
+    }
   }
 
   const getScoreColor = (score: number) => {
@@ -216,6 +252,43 @@ export default function Home() {
               </button>
             )}
           </div>
+
+          {/* Sample Loader */}
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={() => loadSample('valid_F001.png')}
+              className="px-4 py-2 rounded-md text-sm font-medium bg-forest-50 text-forest-700 hover:bg-forest-100"
+              disabled={loading}
+            >
+              Load Valid Sample
+            </button>
+            <button
+              onClick={() => loadSample('sample_007.png')}
+              className="px-4 py-2 rounded-md text-sm font-medium bg-yellow-50 text-yellow-800 hover:bg-yellow-100"
+              disabled={loading}
+            >
+              Load Review Sample
+            </button>
+          </div>
+
+          {/* Validator Admin: Valid Samples */}
+          {validSamples.length > 0 && (
+            <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
+              <h4 className="font-medium text-gray-800 mb-3">Validator Admin: Valid Samples</h4>
+              <div className="flex flex-wrap gap-2">
+                {validSamples.map((name) => (
+                  <button
+                    key={name}
+                    onClick={() => loadSample(name)}
+                    className="px-3 py-1.5 rounded-md text-xs font-medium bg-white border border-gray-200 text-gray-700 hover:bg-gray-100"
+                    disabled={loading}
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Error Display */}
           {error && (

@@ -3,10 +3,10 @@ Quality Assessment Module
 Checks photo quality before OCR processing.
 """
 
-import cv2
-import numpy as np
+import os
 from dataclasses import dataclass
 from typing import List
+from PIL import Image, ImageFilter
 
 
 @dataclass
@@ -32,6 +32,91 @@ def assess_quality(image_path: str, min_blur_threshold: float = 30) -> QualityRe
     Returns:
         QualityReport with scores and recommendations
     """
+    mode = os.getenv("QUALITY_ASSESSMENT_MODE", "opencv").lower()
+    if mode == "stub":
+        try:
+            img = Image.open(image_path)
+        except Exception:
+            return QualityReport(
+                is_acceptable=False,
+                blur_score=0,
+                brightness_score=0,
+                glare_score=0,
+                angle_score=0,
+                resolution_ok=False,
+                issues=["Could not read image file"],
+                suggestions=["Please upload a valid JPG or PNG image"]
+            )
+        img = img.convert("L")
+        width, height = img.size
+        pixels = list(img.getdata())
+        if not pixels:
+            return QualityReport(
+                is_acceptable=False,
+                blur_score=0,
+                brightness_score=0,
+                glare_score=0,
+                angle_score=0,
+                resolution_ok=False,
+                issues=["Could not read image data"],
+                suggestions=["Please upload a valid JPG or PNG image"]
+            )
+
+        brightness = sum(pixels) / len(pixels)
+        brightness_score = max(0, 100 - abs(brightness - 200) / 2)
+
+        edges = img.filter(ImageFilter.FIND_EDGES)
+        edge_pixels = list(edges.getdata())
+        edge_strength = sum(edge_pixels) / len(edge_pixels)
+        blur_score = min(100, edge_strength * 20)
+
+        glare_pixels = sum(1 for p in pixels if p > 245)
+        glare_percentage = (glare_pixels / len(pixels)) * 100
+        glare_score = max(0, 100 - glare_percentage * 0.5)
+
+        resolution_ok = width >= 800 and height >= 600
+        ratio = width / height if height else 1.0
+        angle_score = 85 if 0.6 <= ratio <= 1.6 else 60
+
+        issues = []
+        suggestions = []
+        if blur_score < min_blur_threshold:
+            issues.append("Image is blurry")
+            suggestions.append("Hold camera steady and ensure document is in focus")
+        if brightness < 30:
+            issues.append("Image too dark")
+            suggestions.append("Move to better lighting or use flash")
+        elif brightness > 245:
+            issues.append("Image too bright/overexposed")
+            suggestions.append("Reduce lighting or avoid direct sunlight")
+        if glare_percentage > 60:
+            issues.append("Glare detected on document")
+            suggestions.append("Tilt document to avoid reflections")
+        if not resolution_ok:
+            issues.append(f"Resolution too low ({width}x{height})")
+            suggestions.append("Move closer to document or use higher camera quality")
+
+        is_acceptable = (
+            blur_score >= min_blur_threshold and
+            resolution_ok and
+            glare_score > 20 and
+            len(issues) <= 2
+        )
+
+        return QualityReport(
+            is_acceptable=is_acceptable,
+            blur_score=round(blur_score, 1),
+            brightness_score=round(brightness_score, 1),
+            glare_score=round(glare_score, 1),
+            angle_score=round(angle_score, 1),
+            resolution_ok=resolution_ok,
+            issues=issues,
+            suggestions=suggestions if not is_acceptable else []
+        )
+
+    import cv2
+    import numpy as np
+
     img = cv2.imread(image_path)
     if img is None:
         return QualityReport(
@@ -132,6 +217,12 @@ def preprocess_image(image_path: str, output_path: str = None) -> str:
     Returns:
         Path to processed image
     """
+    mode = os.getenv("QUALITY_ASSESSMENT_MODE", "opencv").lower()
+    if mode == "stub":
+        return image_path
+
+    import cv2
+
     img = cv2.imread(image_path)
     
     # Convert to grayscale

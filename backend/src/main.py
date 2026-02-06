@@ -16,10 +16,28 @@ from pydantic import BaseModel
 from quality_assessment import assess_quality, QualityReport
 from ocr_pipeline import OCRPipeline, OCRResult
 from validation_engine import ValidationEngine, ValidationResult
+from db import (
+    init_db,
+    list_farmers,
+    get_farmer,
+    create_farmer,
+    update_farmer,
+    delete_farmer,
+    get_profile,
+    upsert_profile,
+    delete_profile,
+    list_documents,
+    get_document,
+    create_document,
+    update_document,
+    delete_document,
+)
 
 # Configuration
 USE_GOOGLE_VISION = os.getenv("USE_GOOGLE_VISION", "false").lower() == "true"
-FARMER_DB_PATH = os.getenv("FARMER_DB_PATH", "data/farmers.json")
+USE_TESSERACT = os.getenv("USE_TESSERACT", "false").lower() == "true"
+USE_TESSERACT_CLI = os.getenv("USE_TESSERACT_CLI", "false").lower() == "true"
+FARMER_DB_PATH = os.getenv("FARMER_DB_PATH", "data/farmers.db")
 
 # Initialize FastAPI
 app = FastAPI(
@@ -44,7 +62,11 @@ _validator = None
 def get_ocr():
     global _ocr
     if _ocr is None:
-        _ocr = OCRPipeline(use_google_vision=USE_GOOGLE_VISION)
+        _ocr = OCRPipeline(
+            use_google_vision=USE_GOOGLE_VISION,
+            allow_tesseract=USE_TESSERACT,
+            allow_tesseract_cli=USE_TESSERACT_CLI,
+        )
     return _ocr
 
 def get_validator():
@@ -65,6 +87,12 @@ def get_validator():
                 }
             ])
     return _validator
+
+
+@app.on_event("startup")
+def on_startup():
+    db_path = Path(__file__).parent.parent / FARMER_DB_PATH
+    init_db(str(db_path))
 
 
 # Response Models
@@ -100,6 +128,136 @@ class VerificationResponse(BaseModel):
     validation: Optional[ValidationResponse]
     summary: str
     next_steps: List[str]
+
+
+class FarmerBase(BaseModel):
+    name: Optional[str] = None
+    name_en: Optional[str] = None
+    phone: Optional[str] = None
+    village: Optional[str] = None
+    district: Optional[str] = None
+    state: Optional[str] = None
+    account_number: Optional[str] = None
+    ifsc_code: Optional[str] = None
+    bank_name: Optional[str] = None
+    survey_number: Optional[str] = None
+    area_acres: Optional[float] = None
+    enrolled_date: Optional[str] = None
+
+
+class FarmerCreate(FarmerBase):
+    id: str
+
+
+class FarmerUpdate(FarmerBase):
+    pass
+
+
+class ProfileUpsert(BaseModel):
+    farmer_id: str
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    offline_enabled: bool = False
+
+
+class DocumentCreate(BaseModel):
+    farmer_id: str
+    filename: str
+    status: str = "pending"
+    metadata: Optional[dict] = None
+
+
+class DocumentUpdate(BaseModel):
+    status: Optional[str] = None
+    metadata: Optional[dict] = None
+
+
+@app.get("/farmers")
+def api_list_farmers():
+    return list_farmers()
+
+
+@app.get("/farmers/{farmer_id}")
+def api_get_farmer(farmer_id: str):
+    farmer = get_farmer(farmer_id)
+    if not farmer:
+        raise HTTPException(404, "Farmer not found")
+    return farmer
+
+
+@app.post("/farmers")
+def api_create_farmer(payload: FarmerCreate):
+    created = create_farmer(payload.dict())
+    return created
+
+
+@app.put("/farmers/{farmer_id}")
+def api_update_farmer(farmer_id: str, payload: FarmerUpdate):
+    updated = update_farmer(farmer_id, payload.dict(exclude_none=True))
+    if not updated:
+        raise HTTPException(404, "Farmer not found")
+    return updated
+
+
+@app.delete("/farmers/{farmer_id}")
+def api_delete_farmer(farmer_id: str):
+    if not delete_farmer(farmer_id):
+        raise HTTPException(404, "Farmer not found")
+    return {"deleted": True}
+
+
+@app.get("/profiles/{farmer_id}")
+def api_get_profile(farmer_id: str):
+    profile = get_profile(farmer_id)
+    if not profile:
+        raise HTTPException(404, "Profile not found")
+    return profile
+
+
+@app.post("/profiles")
+def api_upsert_profile(payload: ProfileUpsert):
+    return upsert_profile(payload.dict())
+
+
+@app.delete("/profiles/{farmer_id}")
+def api_delete_profile(farmer_id: str):
+    if not delete_profile(farmer_id):
+        raise HTTPException(404, "Profile not found")
+    return {"deleted": True}
+
+
+@app.get("/documents")
+def api_list_documents(farmer_id: Optional[str] = None):
+    return list_documents(farmer_id)
+
+
+@app.get("/documents/{doc_id}")
+def api_get_document(doc_id: int):
+    document = get_document(doc_id)
+    if not document:
+        raise HTTPException(404, "Document not found")
+    return document
+
+
+@app.post("/documents")
+def api_create_document(payload: DocumentCreate):
+    return create_document(payload.dict())
+
+
+@app.put("/documents/{doc_id}")
+def api_update_document(doc_id: int, payload: DocumentUpdate):
+    updated = update_document(doc_id, payload.dict(exclude_none=True))
+    if not updated:
+        raise HTTPException(404, "Document not found")
+    return updated
+
+
+@app.delete("/documents/{doc_id}")
+def api_delete_document(doc_id: int):
+    if not delete_document(doc_id):
+        raise HTTPException(404, "Document not found")
+    return {"deleted": True}
 
 
 @app.get("/")
@@ -206,14 +364,14 @@ async def verify_document(file: UploadFile = File(...)):
             warnings=validation.warnings
         )
         
-        # Build summary
+        # Build summary and next steps
         if validation.is_valid:
             farmer_name = validation.matched_farmer.get('name_en') or validation.matched_farmer.get('name', 'Unknown')
             summary = f"✅ Document verified! Matched farmer: {farmer_name}"
-            next_steps = ["Document ready for processing", "No further action required"]
         else:
             summary = f"⚠️ Document needs review. {len(validation.issues)} issue(s) found."
-            next_steps = validation.issues + ["Please verify and re-upload if needed"]
+
+        next_steps = _build_next_steps(quality_response, ocr_response, validation)
         
         return VerificationResponse(
             success=validation.is_valid,
@@ -305,6 +463,48 @@ def _sanitize_farmer(farmer: Optional[dict]) -> Optional[dict]:
     # Return only safe fields
     safe_fields = ['id', 'name', 'name_en', 'village', 'district', 'state']
     return {k: v for k, v in farmer.items() if k in safe_fields}
+
+
+def _build_next_steps(
+    quality: QualityResponse,
+    ocr_result: Optional[OCRResponse],
+    validation: ValidationResult
+) -> List[str]:
+    steps: List[str] = []
+
+    if not quality.is_acceptable:
+        if quality.suggestions:
+            steps.extend(quality.suggestions)
+        steps.append("Retake photo in good light and ensure all edges are visible")
+        return steps
+
+    if not ocr_result:
+        steps.append("Retry OCR after improving image clarity")
+        steps.append("If OCR keeps failing, capture a higher-resolution image")
+        return steps
+
+    missing_fields = [
+        field for field, value in ocr_result.fields.items()
+        if field in {"name", "account_number", "ifsc_code", "survey_number"} and not value
+    ]
+    if missing_fields:
+        steps.append(f"Ensure these fields are clearly visible: {', '.join(missing_fields)}")
+
+    if validation.is_valid:
+        steps.append("Proceed to enrollment and mark document as verified")
+        steps.append("Notify the field worker and archive the verified document")
+        return steps
+
+    if validation.warnings:
+        steps.append("Manual review recommended due to low confidence match")
+
+    if validation.issues:
+        steps.append("Resolve validation issues and re-upload the corrected document")
+    else:
+        steps.append("Please verify and re-upload if needed")
+
+    steps.append("If mismatch persists, cross-check with the farmer record")
+    return steps
 
 
 if __name__ == "__main__":
