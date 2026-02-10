@@ -49,8 +49,10 @@ class ValidationEngine:
         Args:
             farmer_database: Path to JSON file or list of farmer records
         """
+        self._db_mode = False
         if isinstance(farmer_database, str):
             if farmer_database.endswith(".db"):
+                self._db_mode = True
                 self.farmers = list_farmers()
             else:
                 with open(farmer_database, 'r', encoding='utf-8') as f:
@@ -93,6 +95,10 @@ class ValidationEngine:
         Returns:
             ValidationResult with match details and issues
         """
+        if self._db_mode:
+            self.farmers = list_farmers()
+            self._build_indices()
+
         issues = []
         warnings = []
         field_matches = {}

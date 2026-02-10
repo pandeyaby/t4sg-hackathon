@@ -15,7 +15,7 @@ pip install -r requirements.txt
 cd src && python main.py
 ```
 
-API runs at http://localhost:8000
+API runs at http://localhost:8000 (or 8004 if you pass `--port 8004`)
 
 ### Frontend (Next.js)
 
@@ -27,12 +27,22 @@ npm run dev
 
 UI runs at http://localhost:3000
 
+### Mobile (Flutter)
+
+```bash
+cd mobile
+flutter pub get
+flutter run -d macos
+```
+
+See `mobile/README.md` for iOS, Android, and Web run targets.
+
 ## ✨ Features
 
 - 📷 **Quality Assessment** - Blur, glare, brightness, angle detection before processing
 - 🔤 **Multilingual OCR** - Hindi, Marathi, English (Google Vision or Tesseract)
 - ✅ **Smart Validation** - Fuzzy matching against farmer database
-- 📱 **Mobile Ready** - Responsive design for field workers
+- 📱 **Mobile Ready** - Flutter app for macOS/iOS/Android + Chrome (web)
 - 🌐 **REST API** - Easy integration with any system
 
 ## 📁 Project Structure
@@ -56,6 +66,7 @@ UI runs at http://localhost:3000
 │   ├── package.json
 │   └── tailwind.config.ts
 │
+├── mobile/                  # Flutter app (macOS/iOS/Android/web)
 ├── ARCHITECTURE.md          # Technical design
 └── README.md
 ```
@@ -69,6 +80,55 @@ UI runs at http://localhost:3000
 | `/quality` | POST | Quality assessment only |
 | `/ocr` | POST | OCR extraction only |
 | `/validate` | POST | Validation only (JSON) |
+| `/farmers` | CRUD | Admin-only farmer records |
+| `/profiles` | CRUD | Admin-only farmer profiles |
+| `/documents` | CRUD | Admin-only document metadata |
+| `/admin/google-credentials` | POST | Admin-only Google Vision setup |
+
+## 🧩 Components & How They Connect
+
+### Backend (FastAPI)
+- **`/verify`** orchestrates the pipeline: quality → OCR → validation
+- **`quality_assessment.py`** runs OpenCV or stub (PIL) quality checks
+- **`ocr_pipeline.py`** uses Google Vision or Tesseract CLI fallback
+- **`validation_engine.py`** fuzzy‑matches OCR fields to farmer records
+- **`db.py`** provides CRUD access to SQLite `farmers.db`
+
+**Data flow**
+1. Client uploads image to `/verify`
+2. Quality assessment gates bad photos
+3. OCR extracts fields
+4. Validation matches fields to farmer records
+5. Response returns summary + next steps
+
+### Frontend (Next.js)
+- Uploads files to `/api/*` which proxy to the backend
+- Displays results, quality scores, OCR and validation
+- Admin UI for Google Vision credentials
+- Sample loader for quick verification demos
+
+### Mobile (Flutter)
+- **macOS / iOS / Android / Web**
+- Uploads image to `/verify`
+- Stores offline documents in local SQLite (Android/iOS/macOS)
+- “Sync When Online” re‑submits pending files
+- Admin screen to configure Google Vision
+- Base URL field for switching environments
+
+## 🔐 Admin Authentication
+Admin‑only routes require `X-Admin-Key` header and `ADMIN_API_KEY` set on backend.
+
+## 🧪 Common Dev Ports
+- Backend: `8000` (default) or `8004` (used in mobile dev)
+- Frontend: `3000`
+
+## 🔄 Extending the Architecture
+- **Add new document types**: extend `validation_engine.py` field rules
+- **Improve OCR**: enable Google Vision or add language packs to Tesseract CLI
+- **Add new data sources**: swap SQLite with Postgres; keep `db.py` interface
+- **Mobile offline**: add background sync + conflict resolution in `LocalStore`
+- **ML scoring**: plug in model scoring after OCR, before validation
+- **Notifications**: add webhook triggers on validation outcomes
 
 ## 🎯 Use Case
 
@@ -81,9 +141,10 @@ Farmers for Forests field workers collect documents (land records, bank details)
 
 ## 🛠️ Tech Stack
 
-- **Backend**: Python, FastAPI, OpenCV, Google Cloud Vision / Tesseract
+- **Backend**: Python, FastAPI, OpenCV (optional), Google Vision / Tesseract CLI
 - **Frontend**: Next.js 14, React, Tailwind CSS
-- **Matching**: RapidFuzz for fuzzy string matching
+- **Mobile**: Flutter, sqflite, file_picker, shared_preferences
+- **Matching**: RapidFuzz (fallback to difflib)
 
 ## 📄 License
 

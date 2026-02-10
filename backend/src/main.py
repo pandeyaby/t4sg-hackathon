@@ -4,11 +4,12 @@ Main FastAPI application.
 """
 
 import os
+import mimetypes
 import tempfile
 from typing import Optional, List
 from pathlib import Path
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -38,6 +39,7 @@ USE_GOOGLE_VISION = os.getenv("USE_GOOGLE_VISION", "false").lower() == "true"
 USE_TESSERACT = os.getenv("USE_TESSERACT", "false").lower() == "true"
 USE_TESSERACT_CLI = os.getenv("USE_TESSERACT_CLI", "false").lower() == "true"
 FARMER_DB_PATH = os.getenv("FARMER_DB_PATH", "data/farmers.db")
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
 # Initialize FastAPI
 app = FastAPI(
@@ -87,6 +89,11 @@ def get_validator():
                 }
             ])
     return _validator
+
+
+def require_admin(x_admin_key: str = Header(default="")):
+    if not ADMIN_API_KEY or x_admin_key != ADMIN_API_KEY:
+        raise HTTPException(401, "Unauthorized")
 
 
 @app.on_event("startup")
@@ -173,12 +180,16 @@ class DocumentUpdate(BaseModel):
     metadata: Optional[dict] = None
 
 
-@app.get("/farmers")
+class GoogleCredentialsPayload(BaseModel):
+    json: str
+
+
+@app.get("/farmers", dependencies=[Depends(require_admin)])
 def api_list_farmers():
     return list_farmers()
 
 
-@app.get("/farmers/{farmer_id}")
+@app.get("/farmers/{farmer_id}", dependencies=[Depends(require_admin)])
 def api_get_farmer(farmer_id: str):
     farmer = get_farmer(farmer_id)
     if not farmer:
@@ -186,13 +197,13 @@ def api_get_farmer(farmer_id: str):
     return farmer
 
 
-@app.post("/farmers")
+@app.post("/farmers", dependencies=[Depends(require_admin)])
 def api_create_farmer(payload: FarmerCreate):
     created = create_farmer(payload.dict())
     return created
 
 
-@app.put("/farmers/{farmer_id}")
+@app.put("/farmers/{farmer_id}", dependencies=[Depends(require_admin)])
 def api_update_farmer(farmer_id: str, payload: FarmerUpdate):
     updated = update_farmer(farmer_id, payload.dict(exclude_none=True))
     if not updated:
@@ -200,14 +211,14 @@ def api_update_farmer(farmer_id: str, payload: FarmerUpdate):
     return updated
 
 
-@app.delete("/farmers/{farmer_id}")
+@app.delete("/farmers/{farmer_id}", dependencies=[Depends(require_admin)])
 def api_delete_farmer(farmer_id: str):
     if not delete_farmer(farmer_id):
         raise HTTPException(404, "Farmer not found")
     return {"deleted": True}
 
 
-@app.get("/profiles/{farmer_id}")
+@app.get("/profiles/{farmer_id}", dependencies=[Depends(require_admin)])
 def api_get_profile(farmer_id: str):
     profile = get_profile(farmer_id)
     if not profile:
@@ -215,24 +226,24 @@ def api_get_profile(farmer_id: str):
     return profile
 
 
-@app.post("/profiles")
+@app.post("/profiles", dependencies=[Depends(require_admin)])
 def api_upsert_profile(payload: ProfileUpsert):
     return upsert_profile(payload.dict())
 
 
-@app.delete("/profiles/{farmer_id}")
+@app.delete("/profiles/{farmer_id}", dependencies=[Depends(require_admin)])
 def api_delete_profile(farmer_id: str):
     if not delete_profile(farmer_id):
         raise HTTPException(404, "Profile not found")
     return {"deleted": True}
 
 
-@app.get("/documents")
+@app.get("/documents", dependencies=[Depends(require_admin)])
 def api_list_documents(farmer_id: Optional[str] = None):
     return list_documents(farmer_id)
 
 
-@app.get("/documents/{doc_id}")
+@app.get("/documents/{doc_id}", dependencies=[Depends(require_admin)])
 def api_get_document(doc_id: int):
     document = get_document(doc_id)
     if not document:
@@ -240,12 +251,12 @@ def api_get_document(doc_id: int):
     return document
 
 
-@app.post("/documents")
+@app.post("/documents", dependencies=[Depends(require_admin)])
 def api_create_document(payload: DocumentCreate):
     return create_document(payload.dict())
 
 
-@app.put("/documents/{doc_id}")
+@app.put("/documents/{doc_id}", dependencies=[Depends(require_admin)])
 def api_update_document(doc_id: int, payload: DocumentUpdate):
     updated = update_document(doc_id, payload.dict(exclude_none=True))
     if not updated:
@@ -253,11 +264,23 @@ def api_update_document(doc_id: int, payload: DocumentUpdate):
     return updated
 
 
-@app.delete("/documents/{doc_id}")
+@app.delete("/documents/{doc_id}", dependencies=[Depends(require_admin)])
 def api_delete_document(doc_id: int):
     if not delete_document(doc_id):
         raise HTTPException(404, "Document not found")
     return {"deleted": True}
+
+
+@app.post("/admin/google-credentials", dependencies=[Depends(require_admin)])
+def api_set_google_credentials(payload: GoogleCredentialsPayload):
+    credentials_path = Path(__file__).parent.parent / "data" / "google-vision.json"
+    credentials_path.write_text(payload.json, encoding="utf-8")
+
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(credentials_path)
+    global USE_GOOGLE_VISION, _ocr
+    USE_GOOGLE_VISION = True
+    _ocr = None
+    return {"configured": True, "path": str(credentials_path)}
 
 
 @app.get("/")
@@ -289,8 +312,15 @@ async def verify_document(file: UploadFile = File(...)):
     
     Returns comprehensive verification result.
     """
-    # Validate file type
-    if not file.content_type or not file.content_type.startswith("image/"):
+    # Validate file type (allow missing/incorrect content-type if extension is image)
+    content_type = file.content_type or ""
+    guessed_type, _ = mimetypes.guess_type(file.filename or "")
+    is_image = content_type.startswith("image/")
+    if not is_image and guessed_type:
+        is_image = guessed_type.startswith("image/")
+    if not is_image and content_type in {"application/octet-stream", "binary/octet-stream"}:
+        is_image = (guessed_type or "").startswith("image/")
+    if not is_image:
         raise HTTPException(400, "File must be an image (jpg, png)")
     
     # Save to temp file
@@ -369,7 +399,15 @@ async def verify_document(file: UploadFile = File(...)):
             farmer_name = validation.matched_farmer.get('name_en') or validation.matched_farmer.get('name', 'Unknown')
             summary = f"✅ Document verified! Matched farmer: {farmer_name}"
         else:
-            summary = f"⚠️ Document needs review. {len(validation.issues)} issue(s) found."
+            reasons = validation.issues or validation.warnings
+            if reasons:
+                reason_text = "; ".join(reasons[:3])
+                summary = (
+                    "⚠️ Document needs review. "
+                    f"Reason(s): {reason_text}."
+                )
+            else:
+                summary = "⚠️ Document needs review. No specific issues detected."
 
         next_steps = _build_next_steps(quality_response, ocr_response, validation)
         

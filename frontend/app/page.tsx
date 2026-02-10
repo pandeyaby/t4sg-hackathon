@@ -48,6 +48,9 @@ export default function Home() {
   const [result, setResult] = useState<VerificationResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [validSamples, setValidSamples] = useState<string[]>([])
+  const [adminKey, setAdminKey] = useState('')
+  const [credentialsJson, setCredentialsJson] = useState('')
+  const [adminStatus, setAdminStatus] = useState<string | null>(null)
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const file = acceptedFiles[0]
@@ -133,6 +136,24 @@ export default function Home() {
       console.error(err)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleConfigureVision = async () => {
+    setAdminStatus(null)
+    try {
+      const response = await fetch('/api/admin/google-credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ adminKey, json: credentialsJson }),
+      })
+      if (!response.ok) {
+        throw new Error('Configuration failed')
+      }
+      setAdminStatus('Google Vision credentials configured')
+    } catch (err) {
+      setAdminStatus('Failed to configure credentials')
+      console.error(err)
     }
   }
 
@@ -289,6 +310,34 @@ export default function Home() {
               </div>
             </div>
           )}
+
+          {/* Admin: Google Vision Setup */}
+          <div className="bg-white border border-gray-200 rounded-lg p-4 space-y-3">
+            <h4 className="font-medium text-gray-800">Admin: Google Vision Setup</h4>
+            <input
+              type="password"
+              value={adminKey}
+              onChange={(e) => setAdminKey(e.target.value)}
+              placeholder="Admin API key"
+              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+            />
+            <textarea
+              value={credentialsJson}
+              onChange={(e) => setCredentialsJson(e.target.value)}
+              placeholder="Paste service account JSON here"
+              rows={5}
+              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+            />
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleConfigureVision}
+                className="px-4 py-2 rounded-md text-sm font-medium bg-forest-600 text-white hover:bg-forest-700"
+              >
+                Configure Google Vision
+              </button>
+              {adminStatus && <span className="text-sm text-gray-600">{adminStatus}</span>}
+            </div>
+          </div>
 
           {/* Error Display */}
           {error && (
