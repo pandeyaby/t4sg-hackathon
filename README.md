@@ -148,7 +148,7 @@ Farmers for Forests field workers collect documents (land records, bank details)
 
 ## 📄 License
 
-MIT License - Built for Cisco Tech for Social Good Hackathon 2026
+MIT License - Built by Cisco for 'Tech for Social Good Hackathon 2026'
 
 ---
 
